@@ -4,3 +4,6 @@ __pycache__/
 uploaded_docs/
 .pytest_cache/
 venv/
+db/
+db_clean/
+data/
