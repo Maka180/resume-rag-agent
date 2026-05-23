@@ -1,0 +1,6 @@
+node_modules/
+__pycache__/
+.env
+uploaded_docs/
+.pytest_cache/
+venv/
