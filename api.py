@@ -15,7 +15,7 @@ os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 # Core LangChain, Driver & Integration Libraries
 from pymongo import MongoClient
 from langchain_mongodb import MongoDBAtlasVectorSearch
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from langchain_groq import ChatGroq  
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import PromptTemplate
@@ -35,18 +35,26 @@ UPLOAD_DIR = "./uploaded_docs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # =====================================================================
-# 1. CLOUD VECTOR DATABASE CONNECTION SETUP
+# 1. CLOUD VECTOR DATABASE CONNECTION SETUP (SERVERLESS EMBEDDINGS)
 # =====================================================================
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
     raise ValueError("CRITICAL ERROR: MONGO_URI missing from environment setup (.env)")
 
+HF_TOKEN = os.getenv("HF_TOKEN")
+if not HF_TOKEN:
+    raise ValueError("CRITICAL ERROR: HF_TOKEN missing from environment setup (.env)")
+
 client = MongoClient(MONGO_URI)
 MONGODB_COLLECTION = client["resume_rag"]["embeddings"]
 ATLAS_VECTOR_INDEX_NAME = "vector_index"
 
-# Local HuggingFace Embedding processor (Produces 384 dimensions)
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+# Serverless Cloud Embedding Engine - Zero local RAM usage
+embeddings = HuggingFaceEndpointEmbeddings(
+    model="sentence-transformers/all-MiniLM-L6-v2",
+    task="feature-extraction",
+    huggingfacehub_api_token=HF_TOKEN
+)
 
 # Active MongoDB vector store bridge
 vector_db = MongoDBAtlasVectorSearch(
@@ -234,7 +242,10 @@ def ask_ai(question: str):
     # 3. Pull primary baseline contextual candidates
     docs = []
     try:
-        docs = vector_db.similarity_search(question, k=5)
+        if search_filter:
+            docs = vector_db.similarity_search(question, k=5, pre_filter=search_filter)
+        else:
+            docs = vector_db.similarity_search(question, k=5)
     except Exception:
         # Fallback if cluster instance indexing hasn't refreshed completely
         docs = vector_db.similarity_search(question, k=4)
