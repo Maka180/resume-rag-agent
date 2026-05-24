@@ -139,8 +139,11 @@ async def upload_documents(files: List[UploadFile] = File(...)):
             if file.filename.endswith('.pdf'):
                 with pdfplumber.open(file_path) as pdf:
                     for page in pdf.pages:
-                        # Extract structural word mapping arrays coordinates cleanly
-                        words = page.extract_words(layout=True, keep_blank_chars=True)
+                        # Version-agnostic token boundary extraction strategy
+                        try:
+                            words = page.extract_words(initialize_with_options=True) or page.extract_words()
+                        except TypeError:
+                            words = page.extract_words()
                         
                         if words:
                             lines = {}
@@ -161,7 +164,7 @@ async def upload_documents(files: List[UploadFile] = File(...)):
                                 
                             extracted_text += "\n".join(page_lines) + "\n"
                         else:
-                            text = page.extract_text(layout=True)
+                            text = page.extract_text()
                             if text:
                                 extracted_text += text + "\n"
                                 
