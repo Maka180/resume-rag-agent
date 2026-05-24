@@ -5,9 +5,8 @@ langchain-mongodb==0.2.0
 langchain-groq==0.2.0
 langchain-text-splitters==0.3.0
 langchain-core==0.3.10
+langchain-community==0.3.0
 pdfplumber==0.11.4
 python-dotenv==1.0.1
 jinja2==3.1.4
 python-multipart==0.0.12
-langchain-huggingface==0.1.0
-huggingface_hub==0.23.2

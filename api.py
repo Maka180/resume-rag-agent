@@ -9,13 +9,13 @@ from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 from dotenv import load_dotenv
 
-# Force HuggingFace Transformers to suppress non-critical configuration logs
+# Force HuggingFace to suppress non-critical configuration logs
 os.environ["TRANSFORMERS_VERBOSITY"] = "error" 
 
 # Core LangChain, Driver & Integration Libraries
 from pymongo import MongoClient
 from langchain_mongodb import MongoDBAtlasVectorSearch
-from langchain_huggingface import HuggingFaceEndpointEmbeddings
+from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
 from langchain_groq import ChatGroq  
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import PromptTemplate
@@ -35,7 +35,7 @@ UPLOAD_DIR = "./uploaded_docs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # =====================================================================
-# 1. CLOUD VECTOR DATABASE CONNECTION SETUP (SERVERLESS EMBEDDINGS)
+# 1. CLOUD VECTOR DATABASE CONNECTION SETUP (WEB-BASED EMBEDDINGS)
 # =====================================================================
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
@@ -49,11 +49,10 @@ client = MongoClient(MONGO_URI)
 MONGODB_COLLECTION = client["resume_rag"]["embeddings"]
 ATLAS_VECTOR_INDEX_NAME = "vector_index"
 
-# Serverless Cloud Embedding Engine - Zero local RAM usage
-embeddings = HuggingFaceEndpointEmbeddings(
-    model="sentence-transformers/all-MiniLM-L6-v2",
-    task="feature-extraction",
-    huggingfacehub_api_token=HF_TOKEN
+# Standalone cloud-based API Client for embedding generation - Zero local dependencies
+embeddings = HuggingFaceInferenceAPIEmbeddings(
+    api_key=HF_TOKEN,
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
 
 # Active MongoDB vector store bridge
