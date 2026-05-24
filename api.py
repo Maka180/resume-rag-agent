@@ -49,10 +49,11 @@ client = MongoClient(MONGO_URI)
 MONGODB_COLLECTION = client["resume_rag"]["embeddings"]
 ATLAS_VECTOR_INDEX_NAME = "vector_index"
 
-# Standalone cloud-based API Client for embedding generation - Zero local dependencies
+# Standalone cloud-based API Client with explicit base URL routing to bypass DNS resolution blocks
 embeddings = HuggingFaceInferenceAPIEmbeddings(
     api_key=HF_TOKEN,
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
+    model_name="sentence-transformers/all-MiniLM-L6-v2",
+    api_url="https://api-inference.huggingface.co/v1"
 )
 
 # Active MongoDB vector store bridge
