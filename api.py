@@ -9,14 +9,10 @@ from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 from dotenv import load_dotenv
 
-# Force HuggingFace to suppress non-critical configuration logs
-os.environ["TRANSFORMERS_VERBOSITY"] = "error" 
-
 # Core LangChain, Driver & Integration Libraries
 from pymongo import MongoClient
 from langchain_mongodb import MongoDBAtlasVectorSearch
-from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
-from langchain_groq import ChatGroq  
+from langchain_groq import ChatGroq, GroqEmbeddings  
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
@@ -35,25 +31,27 @@ UPLOAD_DIR = "./uploaded_docs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # =====================================================================
-# 1. CLOUD VECTOR DATABASE CONNECTION SETUP (WEB-BASED EMBEDDINGS)
+# 1. ENVIROMENT VALIDATION & CONFIGURATION
 # =====================================================================
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
     raise ValueError("CRITICAL ERROR: MONGO_URI missing from environment setup (.env)")
 
-HF_TOKEN = os.getenv("HF_TOKEN")
-if not HF_TOKEN:
-    raise ValueError("CRITICAL ERROR: HF_TOKEN missing from environment setup (.env)")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    raise ValueError("CRITICAL ERROR: GROQ_API_KEY missing from environment setup (.env)")
 
+# =====================================================================
+# 2. CLOUD VECTOR DATABASE CONNECTION SETUP (VIA GROQ EMBEDDINGS)
+# =====================================================================
 client = MongoClient(MONGO_URI)
 MONGODB_COLLECTION = client["resume_rag"]["embeddings"]
 ATLAS_VECTOR_INDEX_NAME = "vector_index"
 
-# Standalone cloud-based API Client with explicit base URL routing to bypass DNS resolution blocks
-embeddings = HuggingFaceInferenceAPIEmbeddings(
-    api_key=HF_TOKEN,
-    model_name="sentence-transformers/all-MiniLM-L6-v2",
-    api_url="https://api-inference.huggingface.co/v1"
+# High-performance embedding model running over stable Groq connections
+embeddings = GroqEmbeddings(
+    model="nomic-embed-text-v1.5",
+    groq_api_key=GROQ_API_KEY
 )
 
 # Active MongoDB vector store bridge
@@ -66,12 +64,8 @@ vector_db = MongoDBAtlasVectorSearch(
 )
 
 # =====================================================================
-# 2. CLOUD TEXT GENERATION PIPELINE SETUP (GROQ LLM)
+# 3. CLOUD TEXT GENERATION PIPELINE SETUP (GROQ LLM)
 # =====================================================================
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    raise ValueError("CRITICAL ERROR: GROQ_API_KEY missing from environment setup (.env)")
-
 llm = ChatGroq(
     model="llama-3.1-8b-instant",  
     temperature=0.0,
@@ -79,7 +73,7 @@ llm = ChatGroq(
 )
 
 # =====================================================================
-# 3. CONVERSATIONAL MEMORY STORAGE & PROMPT TEMPLATE
+# 4. CONVERSATIONAL MEMORY STORAGE & PROMPT TEMPLATE
 # =====================================================================
 chat_history = []
 
@@ -106,7 +100,7 @@ prompt = PromptTemplate.from_template(template)
 
 
 # =====================================================================
-# 4. API ROUTE PATHS
+# 5. API ROUTE PATHS
 # =====================================================================
 
 @app.get("/", response_class=HTMLResponse)
