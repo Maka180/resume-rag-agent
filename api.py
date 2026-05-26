@@ -12,7 +12,8 @@ from dotenv import load_dotenv
 # Core LangChain, Driver & Integration Libraries
 from pymongo import MongoClient
 from langchain_mongodb import MongoDBAtlasVectorSearch
-from langchain_groq import ChatGroq, GroqEmbedding  
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_groq import ChatGroq  
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
@@ -31,7 +32,7 @@ UPLOAD_DIR = "./uploaded_docs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # =====================================================================
-# 1. ENVIROMENT VALIDATION & CONFIGURATION
+# 1. ENVIRONMENT VALIDATION & CONFIGURATION
 # =====================================================================
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
@@ -42,16 +43,15 @@ if not GROQ_API_KEY:
     raise ValueError("CRITICAL ERROR: GROQ_API_KEY missing from environment setup (.env)")
 
 # =====================================================================
-# 2. CLOUD VECTOR DATABASE CONNECTION SETUP (VIA GROQ EMBEDDINGS)
+# 2. LOCAL EMBEDDING ENGINE SETUP (BYPASSES OUTBOUND NETWORK DNS BLOCKS)
 # =====================================================================
 client = MongoClient(MONGO_URI)
 MONGODB_COLLECTION = client["resume_rag"]["embeddings"]
 ATLAS_VECTOR_INDEX_NAME = "vector_index"
 
-# High-performance embedding model running over stable Groq connections
-embeddings = GroqEmbedding(
-    model="nomic-embed-text-v1.5",
-    groq_api_key=GROQ_API_KEY
+# Runs token processing locally inside container memory to secure uptime stability
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
 
 # Active MongoDB vector store bridge

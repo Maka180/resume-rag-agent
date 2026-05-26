@@ -10,3 +10,5 @@ pdfplumber==0.11.4
 python-dotenv==1.0.1
 jinja2==3.1.4
 python-multipart==0.0.12
+langchain-community
+sentence-transformers
