@@ -115,8 +115,7 @@ def read_root(request: Request):
 async def upload_documents(files: List[UploadFile] = File(...)):
     """
     LAYOUT-AWARE BATCH UPLOADER: Extracts text line-by-line, strips whitespace,
-    and aggressively filters out any null or blank text segments to prevent
-    empty inputs from crashing the remote embedding API.
+    and isolates structural string arrays to ensure compliance with the embedding API.
     """
     # Clear the collection before saving the newly uploaded batch profiles
     MONGODB_COLLECTION.delete_many({})
@@ -125,7 +124,7 @@ async def upload_documents(files: List[UploadFile] = File(...)):
     processed_filenames = []
     
     for file in files:
-        # Clean up double extensions if they accidentally occur (e.g., Makanaka CV.pdf.pdf)
+        # Clean up double extensions if they accidentally occur
         clean_filename = file.filename
         if clean_filename.count('.pdf') > 1:
             clean_filename = clean_filename.replace('.pdf.pdf', '.pdf')
@@ -174,7 +173,6 @@ async def upload_documents(files: List[UploadFile] = File(...)):
                 with open(file_path, "r", encoding="utf-8") as f:
                     extracted_text = f.read()
                     
-            # Skip file entirely if no text content was found
             if not extracted_text or not extracted_text.strip():
                 continue
             
@@ -195,18 +193,39 @@ async def upload_documents(files: List[UploadFile] = File(...)):
             
             split_texts = text_splitter.split_text(extracted_text)
             
-            # CRITICAL ADVANCED VALIDATION: Ensure text is non-empty and stripped 
-            # to guarantee the remote API receives a clean, non-blank string element.
+            # HARDENED EXPLICIT VALIDATION: 
+            # Force verify every single chunk is a raw, non-empty python string primitive
             chunks = []
             for text in split_texts:
-                cleaned_chunk_text = text.strip()
-                if cleaned_chunk_text: # Strictly filters out empty strings or structural gaps
-                    chunks.append(Document(page_content=cleaned_chunk_text, metadata={"source": clean_filename.lower()}))
+                if isinstance(text, str) and text.strip():
+                    cleaned_chunk_text = str(text.strip())
+                    # Ensure the chunk doesn't contain weird hidden null bytes
+                    cleaned_chunk_text = cleaned_chunk_text.replace('\x00', '')
+                    if len(cleaned_chunk_text) > 5:  # Skip tiny fragments or residual structural artifacts
+                        chunks.append(Document(page_content=cleaned_chunk_text, metadata={"source": clean_filename.lower()}))
             
+            # Safe individual batch insertion loop to catch individual bad elements
             if chunks:
-                vector_db.add_documents(chunks)
-                total_chunks_processed += len(chunks)
-                processed_filenames.append(clean_filename)
+                try:
+                    vector_db.add_documents(chunks)
+                    total_chunks_processed += len(chunks)
+                    processed_filenames.append(clean_filename)
+                except Exception as embedding_error:
+                    # Fallback method: If batching fails, attempt inserting chunks one by one
+                    # to isolate and discard the exact element offending the remote API
+                    valid_individual_chunks = 0
+                    for individual_chunk in chunks:
+                        try:
+                            vector_db.add_documents([individual_chunk])
+                            valid_individual_chunks += 1
+                        except Exception:
+                            continue # Gracefully skip the bad chunk
+                    
+                    if valid_individual_chunks > 0:
+                        total_chunks_processed += valid_individual_chunks
+                        processed_filenames.append(clean_filename)
+                    else:
+                        raise embedding_error
                 
         except Exception as e:
             if os.path.exists(file_path):
@@ -223,7 +242,7 @@ async def upload_documents(files: List[UploadFile] = File(...)):
         "status": "Success",
         "files_processed": processed_filenames,
         "chunks_processed": total_chunks_processed,
-        "message": "Batch vector processing completed successfully with blank-string safety controls!"
+        "message": "Batch vector processing completed successfully with isolated string arrays!"
     }
 
 
