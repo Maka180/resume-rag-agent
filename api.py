@@ -44,9 +44,7 @@ if not GROQ_API_KEY:
     raise ValueError("CRITICAL ERROR: GROQ_API_KEY missing from environment setup (.env)")
 
 # =====================================================================
-# 2. CUSTOM GROQ EMBEDDINGS WRAPPER
-#    Bypasses langchain-openai adapter entirely — sends exactly what
-#    Groq's API expects: {"model": "...", "input": ["string", ...]}
+# 2. CUSTOM GROQ EMBEDDINGS WRAPPER (SYNCHRONIZED SHAPE MATCHING)
 # =====================================================================
 class GroqEmbeddings(Embeddings):
     def __init__(self, api_key: str, model: str = "nomic-embed-text-v1.5"):
@@ -55,10 +53,16 @@ class GroqEmbeddings(Embeddings):
         self.base_url = "https://api.groq.com/openai/v1/embeddings"
 
     def _embed(self, texts: list) -> list:
-        # Enforce plain string list — Groq will 400 on anything else
-        clean_texts = [str(t).strip() for t in texts if t and str(t).strip()]
+        # Heavily normalize strings without altering array layout shape
+        clean_texts = []
+        for t in texts:
+            val = str(t).strip().replace('\x00', '')
+            # If text is structurally blank, pass a tiny placeholder to prevent 400 or index mismatches
+            clean_texts.append(val if val else "placeholder text")
+
         if not clean_texts:
             return []
+
         response = requests.post(
             self.base_url,
             headers={
@@ -69,13 +73,16 @@ class GroqEmbeddings(Embeddings):
         )
         response.raise_for_status()
         data = response.json()
+        
+        # Sort explicitly by returned array tracking index to align with LangChain inputs
         return [item["embedding"] for item in sorted(data["data"], key=lambda x: x["index"])]
 
-    def embed_documents(self, texts: list) -> list:
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
         return self._embed(texts)
 
-    def embed_query(self, text: str) -> list:
-        return self._embed([text])[0]
+    def embed_query(self, text: str) -> List[float]:
+        res = self._embed([text])
+        return res[0] if res else [0.0] * 768  # Fallback to base model dimension if empty
 
 
 # =====================================================================
@@ -155,7 +162,6 @@ async def upload_documents(files: List[UploadFile] = File(...)):
     processed_filenames = []
 
     for file in files:
-        # Clean up double extensions if they accidentally occur
         clean_filename = file.filename
         if clean_filename.count('.pdf') > 1:
             clean_filename = clean_filename.replace('.pdf.pdf', '.pdf')
@@ -224,36 +230,35 @@ async def upload_documents(files: List[UploadFile] = File(...)):
 
             split_texts = text_splitter.split_text(extracted_text)
 
-            # HARDENED EXPLICIT VALIDATION:
-            # Force verify every single chunk is a raw, non-empty python string primitive
+            # Strict parsing filter: Build clean string lists
             chunks = []
             for text in split_texts:
                 if isinstance(text, str) and text.strip():
-                    cleaned_chunk_text = str(text.strip())
-                    # Ensure the chunk doesn't contain weird hidden null bytes
-                    cleaned_chunk_text = cleaned_chunk_text.replace('\x00', '')
-                    # Skip tiny fragments, residual structural artifacts, or non-ASCII-safe junk
+                    cleaned_chunk_text = str(text.strip()).replace('\x00', '')
+                    # Skip noise text blocks
                     if len(cleaned_chunk_text) > 10:
                         chunks.append(Document(
                             page_content=cleaned_chunk_text,
                             metadata={"source": clean_filename.lower()}
                         ))
 
-            # Safe individual batch insertion loop to catch individual bad elements
+            # Fire batch processing safely with individual chunk recovery
             if chunks:
                 try:
                     vector_db.add_documents(chunks)
                     total_chunks_processed += len(chunks)
                     processed_filenames.append(clean_filename)
                 except Exception as embedding_error:
-                    # Fallback: insert one by one to isolate and discard offending chunks
+                    # Individual document fallback wrapper isolates array dimension errors
                     valid_individual_chunks = 0
                     for individual_chunk in chunks:
                         try:
-                            vector_db.add_documents([individual_chunk])
-                            valid_individual_chunks += 1
+                            # Verify text element is explicitly valid prior to execution
+                            if individual_chunk.page_content.strip():
+                                vector_db.add_documents([individual_chunk])
+                                valid_individual_chunks += 1
                         except Exception:
-                            continue  # Gracefully skip the bad chunk
+                            continue
 
                     if valid_individual_chunks > 0:
                         total_chunks_processed += valid_individual_chunks
