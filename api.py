@@ -1,6 +1,7 @@
 import os
 import shutil
 import csv
+import requests
 from io import StringIO
 from typing import List
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -12,12 +13,12 @@ from dotenv import load_dotenv
 # Core LangChain, Driver & Integration Libraries
 from pymongo import MongoClient
 from langchain_mongodb import MongoDBAtlasVectorSearch
-from langchain_openai import OpenAIEmbeddings
-from langchain_groq import ChatGroq  
+from langchain_core.embeddings import Embeddings
+from langchain_groq import ChatGroq
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
-import pdfplumber  
+import pdfplumber
 
 # Load environment configuration variables securely
 load_dotenv()
@@ -43,18 +44,48 @@ if not GROQ_API_KEY:
     raise ValueError("CRITICAL ERROR: GROQ_API_KEY missing from environment setup (.env)")
 
 # =====================================================================
-# 2. HIGH-PERFORMANCE API EMBEDDING ROUTE (LOW MEMORY PROFILE)
+# 2. CUSTOM GROQ EMBEDDINGS WRAPPER
+#    Bypasses langchain-openai adapter entirely — sends exactly what
+#    Groq's API expects: {"model": "...", "input": ["string", ...]}
+# =====================================================================
+class GroqEmbeddings(Embeddings):
+    def __init__(self, api_key: str, model: str = "nomic-embed-text-v1.5"):
+        self.api_key = api_key
+        self.model = model
+        self.base_url = "https://api.groq.com/openai/v1/embeddings"
+
+    def _embed(self, texts: list) -> list:
+        # Enforce plain string list — Groq will 400 on anything else
+        clean_texts = [str(t).strip() for t in texts if t and str(t).strip()]
+        if not clean_texts:
+            return []
+        response = requests.post(
+            self.base_url,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            },
+            json={"model": self.model, "input": clean_texts}
+        )
+        response.raise_for_status()
+        data = response.json()
+        return [item["embedding"] for item in sorted(data["data"], key=lambda x: x["index"])]
+
+    def embed_documents(self, texts: list) -> list:
+        return self._embed(texts)
+
+    def embed_query(self, text: str) -> list:
+        return self._embed([text])[0]
+
+
+# =====================================================================
+# 3. DATABASE & VECTOR STORE SETUP
 # =====================================================================
 client = MongoClient(MONGO_URI)
 MONGODB_COLLECTION = client["resume_rag"]["embeddings"]
 ATLAS_VECTOR_INDEX_NAME = "vector_index"
 
-# Routes embedding execution through Groq's API pipeline to keep memory minimal
-embeddings = OpenAIEmbeddings(
-    model="nomic-embed-text-v1.5",
-    openai_api_key=GROQ_API_KEY,
-    openai_api_base="https://api.groq.com/openai/v1"
-)
+embeddings = GroqEmbeddings(api_key=GROQ_API_KEY)
 
 # Active MongoDB vector store bridge
 vector_db = MongoDBAtlasVectorSearch(
@@ -66,16 +97,16 @@ vector_db = MongoDBAtlasVectorSearch(
 )
 
 # =====================================================================
-# 3. CLOUD TEXT GENERATION PIPELINE SETUP (GROQ LLM)
+# 4. CLOUD TEXT GENERATION PIPELINE SETUP (GROQ LLM)
 # =====================================================================
 llm = ChatGroq(
-    model="llama-3.1-8b-instant",  
+    model="llama-3.1-8b-instant",
     temperature=0.0,
     groq_api_key=GROQ_API_KEY
 )
 
 # =====================================================================
-# 4. CONVERSATIONAL MEMORY STORAGE & PROMPT TEMPLATE
+# 5. CONVERSATIONAL MEMORY STORAGE & PROMPT TEMPLATE
 # =====================================================================
 chat_history = []
 
@@ -102,7 +133,7 @@ prompt = PromptTemplate.from_template(template)
 
 
 # =====================================================================
-# 5. API ROUTE PATHS
+# 6. API ROUTE PATHS
 # =====================================================================
 
 @app.get("/", response_class=HTMLResponse)
@@ -119,23 +150,23 @@ async def upload_documents(files: List[UploadFile] = File(...)):
     """
     # Clear the collection before saving the newly uploaded batch profiles
     MONGODB_COLLECTION.delete_many({})
-    
+
     total_chunks_processed = 0
     processed_filenames = []
-    
+
     for file in files:
         # Clean up double extensions if they accidentally occur
         clean_filename = file.filename
         if clean_filename.count('.pdf') > 1:
             clean_filename = clean_filename.replace('.pdf.pdf', '.pdf')
-            
+
         if not clean_filename.lower().endswith(('.pdf', '.txt')):
-            continue  
-            
+            continue
+
         file_path = os.path.join(UPLOAD_DIR, clean_filename)
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-            
+
         extracted_text = ""
         try:
             if clean_filename.lower().endswith('.pdf'):
@@ -145,55 +176,55 @@ async def upload_documents(files: List[UploadFile] = File(...)):
                             words = page.extract_words(initialize_with_options=True) or page.extract_words()
                         except TypeError:
                             words = page.extract_words()
-                        
+
                         if words:
                             lines = {}
                             for w in words:
                                 top = round(w['top'], 1)
                                 matched_top = min(lines.keys(), key=lambda t: abs(t - top), default=None)
-                                
+
                                 if matched_top is not None and abs(matched_top - top) < 3:
                                     lines[matched_top].append(w)
                                 else:
                                     lines[top] = [w]
-                            
+
                             page_lines = []
                             for t in sorted(lines.keys()):
                                 sorted_words = sorted(lines[t], key=lambda w: w['x0'])
                                 line_text = " ".join([w['text'] for w in sorted_words])
                                 page_lines.append(line_text)
-                                
+
                             extracted_text += "\n".join(page_lines) + "\n"
                         else:
                             text = page.extract_text()
                             if text:
                                 extracted_text += text + "\n"
-                                
+
             elif clean_filename.lower().endswith('.txt'):
                 with open(file_path, "r", encoding="utf-8") as f:
                     extracted_text = f.read()
-                    
+
             if not extracted_text or not extracted_text.strip():
                 continue
-            
+
             processed_lines = []
             for line in extracted_text.split("\n"):
                 if line.strip():
                     processed_lines.append(line.strip())
             extracted_text = "\n".join(processed_lines)
-            
+
             if not extracted_text.strip():
                 continue
-                
+
             text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=600,       
-                chunk_overlap=150,    
+                chunk_size=600,
+                chunk_overlap=150,
                 separators=["\n\n", "\n", " ", ""]
             )
-            
+
             split_texts = text_splitter.split_text(extracted_text)
-            
-            # HARDENED EXPLICIT VALIDATION: 
+
+            # HARDENED EXPLICIT VALIDATION:
             # Force verify every single chunk is a raw, non-empty python string primitive
             chunks = []
             for text in split_texts:
@@ -201,9 +232,13 @@ async def upload_documents(files: List[UploadFile] = File(...)):
                     cleaned_chunk_text = str(text.strip())
                     # Ensure the chunk doesn't contain weird hidden null bytes
                     cleaned_chunk_text = cleaned_chunk_text.replace('\x00', '')
-                    if len(cleaned_chunk_text) > 5:  # Skip tiny fragments or residual structural artifacts
-                        chunks.append(Document(page_content=cleaned_chunk_text, metadata={"source": clean_filename.lower()}))
-            
+                    # Skip tiny fragments, residual structural artifacts, or non-ASCII-safe junk
+                    if len(cleaned_chunk_text) > 10:
+                        chunks.append(Document(
+                            page_content=cleaned_chunk_text,
+                            metadata={"source": clean_filename.lower()}
+                        ))
+
             # Safe individual batch insertion loop to catch individual bad elements
             if chunks:
                 try:
@@ -211,33 +246,35 @@ async def upload_documents(files: List[UploadFile] = File(...)):
                     total_chunks_processed += len(chunks)
                     processed_filenames.append(clean_filename)
                 except Exception as embedding_error:
-                    # Fallback method: If batching fails, attempt inserting chunks one by one
-                    # to isolate and discard the exact element offending the remote API
+                    # Fallback: insert one by one to isolate and discard offending chunks
                     valid_individual_chunks = 0
                     for individual_chunk in chunks:
                         try:
                             vector_db.add_documents([individual_chunk])
                             valid_individual_chunks += 1
                         except Exception:
-                            continue # Gracefully skip the bad chunk
-                    
+                            continue  # Gracefully skip the bad chunk
+
                     if valid_individual_chunks > 0:
                         total_chunks_processed += valid_individual_chunks
                         processed_filenames.append(clean_filename)
                     else:
                         raise embedding_error
-                
+
         except Exception as e:
             if os.path.exists(file_path):
                 os.remove(file_path)
             raise HTTPException(status_code=500, detail=f"Error parsing {clean_filename}: {str(e)}")
         finally:
-            if os.path.exists(file_path): 
+            if os.path.exists(file_path):
                 os.remove(file_path)
-                
+
     if not processed_filenames:
-        raise HTTPException(status_code=400, detail="No valid text content could be processed from the uploaded documents.")
-        
+        raise HTTPException(
+            status_code=400,
+            detail="No valid text content could be processed from the uploaded documents."
+        )
+
     return {
         "status": "Success",
         "files_processed": processed_filenames,
@@ -255,17 +292,17 @@ def ask_ai(question: str):
     """
     global chat_history
     lowered_q = question.lower()
-    
+
     target_candidate = None
     if "makanaka" in lowered_q:
         target_candidate = "makanaka"
     elif "orripah" in lowered_q:
         target_candidate = "orripah"
-        
+
     search_filter = {}
     if target_candidate:
         search_filter = {"metadata.source": {"$regex": target_candidate, "$options": "i"}}
-        
+
     docs = []
     try:
         if search_filter:
@@ -274,7 +311,7 @@ def ask_ai(question: str):
             docs = vector_db.similarity_search(question, k=5)
     except Exception:
         docs = vector_db.similarity_search(question, k=4)
-        
+
     fallback_keywords = []
     if any(kw in lowered_q for kw in ["address", "location", "stay", "live", "where"]):
         fallback_keywords.extend(["durban", "gauteng", "south africa", "road", "street", "avenue", "residential"])
@@ -286,10 +323,10 @@ def ask_ai(question: str):
     if fallback_keywords:
         regex_pattern = "|".join(fallback_keywords)
         fallback_query = {"text": {"$regex": regex_pattern, "$options": "i"}}
-        
+
         if target_candidate:
             fallback_query["metadata.source"] = {"$regex": target_candidate, "$options": "i"}
-            
+
         try:
             fallback_cursor = MONGODB_COLLECTION.find(fallback_query).limit(3)
             for item in fallback_cursor:
@@ -297,39 +334,39 @@ def ask_ai(question: str):
                 if doc_text and not any(doc_text.strip() == d.page_content.strip() for d in docs):
                     docs.append(Document(page_content=doc_text))
         except Exception:
-            pass 
-            
+            pass
+
     context_chunks = [doc.page_content.strip() for doc in docs if doc.page_content]
     context = "\n---\n".join(context_chunks)
-    
+
     if not context.strip():
         return {
             "question": question,
             "answer": "Not explicitly stated.",
             "sources": []
         }
-        
+
     history_str = ""
     for turn in chat_history[-2:]:
         history_str += f"User: {turn['q']}\nAI: {turn['a']}\n"
     if not history_str:
         history_str = "None"
-        
+
     formatted_prompt = prompt.format(context=context, history=history_str, question=question)
-    
+
     ai_response = llm.invoke(formatted_prompt)
     final_answer = ai_response.content
-    
+
     if "Answer:" in final_answer:
         final_answer = final_answer.split("Answer:")[-1]
     final_answer = final_answer.split("<|im_end|>")[0].split("User:")[0].strip()
-    
+
     chat_history.append({"q": question, "a": final_answer})
-    
+
     return {
         "question": question,
         "answer": final_answer,
-        "sources": context_chunks  
+        "sources": context_chunks
     }
 
 
@@ -339,14 +376,14 @@ def export_history_to_csv():
     global chat_history
     if not chat_history:
         raise HTTPException(status_code=400, detail="No evaluation history available to export.")
-        
+
     stream = StringIO()
     writer = csv.writer(stream)
     writer.writerow(["Evaluation Question", "Verified AI Compliance Output"])
-    
+
     for turn in chat_history:
         writer.writerow([turn["q"], turn["a"]])
-        
+
     response = StreamingResponse(
         iter([stream.getvalue()]),
         media_type="text/csv"
@@ -361,6 +398,3 @@ def clear_chat():
     global chat_history
     chat_history = []
     return {"status": "Memory reset complete"}
-
-
-    
