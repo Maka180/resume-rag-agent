@@ -43,13 +43,13 @@ if not GROQ_API_KEY:
     raise ValueError("CRITICAL ERROR: GROQ_API_KEY missing from environment setup (.env)")
 
 # =====================================================================
-# 2. HIGH-PERFORMANCE API EMBEDDING ROUTE (LOW MEMORY / NO LOCAL TORCH)
+# 2. HIGH-PERFORMANCE API EMBEDDING ROUTE (LOW MEMORY PROFILE)
 # =====================================================================
 client = MongoClient(MONGO_URI)
 MONGODB_COLLECTION = client["resume_rag"]["embeddings"]
 ATLAS_VECTOR_INDEX_NAME = "vector_index"
 
-# Routes embedding execution through Groq's API pipeline to keep memory under 512MB
+# Routes embedding execution through Groq's API pipeline to keep memory minimal
 embeddings = OpenAIEmbeddings(
     model="nomic-embed-text-v1.5",
     openai_api_key=GROQ_API_KEY,
@@ -329,3 +329,4 @@ def clear_chat():
     global chat_history
     chat_history = []
     return {"status": "Memory reset complete"}
+    
