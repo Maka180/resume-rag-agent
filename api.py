@@ -114,8 +114,9 @@ def read_root(request: Request):
 @app.post("/upload")
 async def upload_documents(files: List[UploadFile] = File(...)):
     """
-    LAYOUT-AWARE BATCH UPLOADER: Extracts text line-by-line while keeping structural
-    inline whitespace completely intact to ensure clean data parsing.
+    LAYOUT-AWARE BATCH UPLOADER: Extracts text line-by-line, strips whitespace,
+    and aggressively filters out any null or blank text segments to prevent
+    empty inputs from crashing the remote embedding API.
     """
     # Clear the collection before saving the newly uploaded batch profiles
     MONGODB_COLLECTION.delete_many({})
@@ -124,16 +125,21 @@ async def upload_documents(files: List[UploadFile] = File(...)):
     processed_filenames = []
     
     for file in files:
-        if not file.filename.endswith(('.pdf', '.txt')):
+        # Clean up double extensions if they accidentally occur (e.g., Makanaka CV.pdf.pdf)
+        clean_filename = file.filename
+        if clean_filename.count('.pdf') > 1:
+            clean_filename = clean_filename.replace('.pdf.pdf', '.pdf')
+            
+        if not clean_filename.lower().endswith(('.pdf', '.txt')):
             continue  
             
-        file_path = os.path.join(UPLOAD_DIR, file.filename)
+        file_path = os.path.join(UPLOAD_DIR, clean_filename)
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
             
         extracted_text = ""
         try:
-            if file.filename.endswith('.pdf'):
+            if clean_filename.lower().endswith('.pdf'):
                 with pdfplumber.open(file_path) as pdf:
                     for page in pdf.pages:
                         try:
@@ -164,11 +170,12 @@ async def upload_documents(files: List[UploadFile] = File(...)):
                             if text:
                                 extracted_text += text + "\n"
                                 
-            elif file.filename.endswith('.txt'):
+            elif clean_filename.lower().endswith('.txt'):
                 with open(file_path, "r", encoding="utf-8") as f:
                     extracted_text = f.read()
                     
-            if not extracted_text.strip():
+            # Skip file entirely if no text content was found
+            if not extracted_text or not extracted_text.strip():
                 continue
             
             processed_lines = []
@@ -176,6 +183,9 @@ async def upload_documents(files: List[UploadFile] = File(...)):
                 if line.strip():
                     processed_lines.append(line.strip())
             extracted_text = "\n".join(processed_lines)
+            
+            if not extracted_text.strip():
+                continue
                 
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=600,       
@@ -185,32 +195,35 @@ async def upload_documents(files: List[UploadFile] = File(...)):
             
             split_texts = text_splitter.split_text(extracted_text)
             
-            chunks = [
-                Document(page_content=text, metadata={"source": file.filename.lower()}) 
-                for text in split_texts
-            ]
+            # CRITICAL ADVANCED VALIDATION: Ensure text is non-empty and stripped 
+            # to guarantee the remote API receives a clean, non-blank string element.
+            chunks = []
+            for text in split_texts:
+                cleaned_chunk_text = text.strip()
+                if cleaned_chunk_text: # Strictly filters out empty strings or structural gaps
+                    chunks.append(Document(page_content=cleaned_chunk_text, metadata={"source": clean_filename.lower()}))
             
             if chunks:
                 vector_db.add_documents(chunks)
                 total_chunks_processed += len(chunks)
-                processed_filenames.append(file.filename)
+                processed_filenames.append(clean_filename)
                 
         except Exception as e:
             if os.path.exists(file_path):
                 os.remove(file_path)
-            raise HTTPException(status_code=500, detail=f"Error parsing {file.filename}: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error parsing {clean_filename}: {str(e)}")
         finally:
             if os.path.exists(file_path): 
                 os.remove(file_path)
                 
     if not processed_filenames:
-        raise HTTPException(status_code=400, detail="No valid text could be parsed from the uploaded profiles.")
+        raise HTTPException(status_code=400, detail="No valid text content could be processed from the uploaded documents.")
         
     return {
         "status": "Success",
         "files_processed": processed_filenames,
         "chunks_processed": total_chunks_processed,
-        "message": "Batch vector processing completed successfully with structured spacing!"
+        "message": "Batch vector processing completed successfully with blank-string safety controls!"
     }
 
 
@@ -329,4 +342,6 @@ def clear_chat():
     global chat_history
     chat_history = []
     return {"status": "Memory reset complete"}
+
+
     
