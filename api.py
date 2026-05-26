@@ -44,7 +44,9 @@ if not GROQ_API_KEY:
     raise ValueError("CRITICAL ERROR: GROQ_API_KEY missing from environment setup (.env)")
 
 # =====================================================================
-# 2. CUSTOM GROQ EMBEDDINGS WRAPPER (SYNCHRONIZED SHAPE MATCHING)
+# 2. CUSTOM GROQ EMBEDDINGS WRAPPER (SYNCHRONIZED ARRAY SHAPE)
+#    Bypasses langchain-openai adapter entirely — sends exactly what
+#    Groq's API expects while maintaining parallel structural matching.
 # =====================================================================
 class GroqEmbeddings(Embeddings):
     def __init__(self, api_key: str, model: str = "nomic-embed-text-v1.5"):
@@ -53,11 +55,11 @@ class GroqEmbeddings(Embeddings):
         self.base_url = "https://api.groq.com/openai/v1/embeddings"
 
     def _embed(self, texts: list) -> list:
-        # Heavily normalize strings without altering array layout shape
+        # Heavily normalize strings without altering incoming array index shapes
         clean_texts = []
         for t in texts:
             val = str(t).strip().replace('\x00', '')
-            # If text is structurally blank, pass a tiny placeholder to prevent 400 or index mismatches
+            # Pass a minimal fallback string if empty to prevent 400 array dimension validation bugs
             clean_texts.append(val if val else "placeholder text")
 
         if not clean_texts:
@@ -74,15 +76,15 @@ class GroqEmbeddings(Embeddings):
         response.raise_for_status()
         data = response.json()
         
-        # Sort explicitly by returned array tracking index to align with LangChain inputs
+        # Explicitly sort elements based on API response tracking index to keep inputs aligned
         return [item["embedding"] for item in sorted(data["data"], key=lambda x: x["index"])]
 
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+    def embed_documents(self, texts: list) -> list:
         return self._embed(texts)
 
-    def embed_query(self, text: str) -> List[float]:
+    def embed_query(self, text: str) -> list:
         res = self._embed([text])
-        return res[0] if res else [0.0] * 768  # Fallback to base model dimension if empty
+        return res[0] if res else [0.0] * 768
 
 
 # =====================================================================
@@ -230,30 +232,28 @@ async def upload_documents(files: List[UploadFile] = File(...)):
 
             split_texts = text_splitter.split_text(extracted_text)
 
-            # Strict parsing filter: Build clean string lists
+            # Build document chunks checking for hidden null bits or tiny fragments
             chunks = []
             for text in split_texts:
                 if isinstance(text, str) and text.strip():
                     cleaned_chunk_text = str(text.strip()).replace('\x00', '')
-                    # Skip noise text blocks
                     if len(cleaned_chunk_text) > 10:
                         chunks.append(Document(
                             page_content=cleaned_chunk_text,
                             metadata={"source": clean_filename.lower()}
                         ))
 
-            # Fire batch processing safely with individual chunk recovery
+            # Batch document submission fallback pipeline
             if chunks:
                 try:
                     vector_db.add_documents(chunks)
                     total_chunks_processed += len(chunks)
                     processed_filenames.append(clean_filename)
                 except Exception as embedding_error:
-                    # Individual document fallback wrapper isolates array dimension errors
+                    # Fallback structural isolation: write chunks one by one if a remote issue occurs
                     valid_individual_chunks = 0
                     for individual_chunk in chunks:
                         try:
-                            # Verify text element is explicitly valid prior to execution
                             if individual_chunk.page_content.strip():
                                 vector_db.add_documents([individual_chunk])
                                 valid_individual_chunks += 1
