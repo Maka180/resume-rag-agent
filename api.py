@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 # Core LangChain, Driver & Integration Libraries
 from pymongo import MongoClient
 from langchain_mongodb import MongoDBAtlasVectorSearch
-from langchain_groq import ChatGroq, GroqEmbeddings  
+from langchain_groq import ChatGroq, GroqEmbedding  
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
@@ -49,7 +49,7 @@ MONGODB_COLLECTION = client["resume_rag"]["embeddings"]
 ATLAS_VECTOR_INDEX_NAME = "vector_index"
 
 # High-performance embedding model running over stable Groq connections
-embeddings = GroqEmbeddings(
+embeddings = GroqEmbedding(
     model="nomic-embed-text-v1.5",
     groq_api_key=GROQ_API_KEY
 )
@@ -134,7 +134,6 @@ async def upload_documents(files: List[UploadFile] = File(...)):
             if file.filename.endswith('.pdf'):
                 with pdfplumber.open(file_path) as pdf:
                     for page in pdf.pages:
-                        # Version-agnostic token boundary extraction strategy
                         try:
                             words = page.extract_words(initialize_with_options=True) or page.extract_words()
                         except TypeError:
@@ -184,7 +183,6 @@ async def upload_documents(files: List[UploadFile] = File(...)):
             
             split_texts = text_splitter.split_text(extracted_text)
             
-            # Embed the source name into the standard document metadata map
             chunks = [
                 Document(page_content=text, metadata={"source": file.filename.lower()}) 
                 for text in split_texts
@@ -224,19 +222,16 @@ def ask_ai(question: str):
     global chat_history
     lowered_q = question.lower()
     
-    # 1. Isolate target identity mentions dynamically from the query string
     target_candidate = None
     if "makanaka" in lowered_q:
         target_candidate = "makanaka"
     elif "orripah" in lowered_q:
         target_candidate = "orripah"
         
-    # 2. Build explicit metadata equality filter blocks for standard vector passes
     search_filter = {}
     if target_candidate:
         search_filter = {"metadata.source": {"$regex": target_candidate, "$options": "i"}}
         
-    # 3. Pull primary baseline contextual candidates
     docs = []
     try:
         if search_filter:
@@ -244,10 +239,8 @@ def ask_ai(question: str):
         else:
             docs = vector_db.similarity_search(question, k=5)
     except Exception:
-        # Fallback if cluster instance indexing hasn't refreshed completely
         docs = vector_db.similarity_search(question, k=4)
         
-    # 4. HYBRID REGEX LAYER: Force-inject primary contact or header rows if missed by vectors
     fallback_keywords = []
     if any(kw in lowered_q for kw in ["address", "location", "stay", "live", "where"]):
         fallback_keywords.extend(["durban", "gauteng", "south africa", "road", "street", "avenue", "residential"])
@@ -260,7 +253,6 @@ def ask_ai(question: str):
         regex_pattern = "|".join(fallback_keywords)
         fallback_query = {"text": {"$regex": regex_pattern, "$options": "i"}}
         
-        # Lock lookup inside the target candidate file boundary
         if target_candidate:
             fallback_query["metadata.source"] = {"$regex": target_candidate, "$options": "i"}
             
@@ -271,9 +263,8 @@ def ask_ai(question: str):
                 if doc_text and not any(doc_text.strip() == d.page_content.strip() for d in docs):
                     docs.append(Document(page_content=doc_text))
         except Exception:
-            pass # Ensure fluid response continuity even if lookup cursor errors out
+            pass 
             
-    # 5. Build context payload strings cleanly
     context_chunks = [doc.page_content.strip() for doc in docs if doc.page_content]
     context = "\n---\n".join(context_chunks)
     
