@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 # Core LangChain, Driver & Integration Libraries
 from pymongo import MongoClient
 from langchain_mongodb import MongoDBAtlasVectorSearch
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain_groq import ChatGroq  
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import PromptTemplate
@@ -43,15 +43,17 @@ if not GROQ_API_KEY:
     raise ValueError("CRITICAL ERROR: GROQ_API_KEY missing from environment setup (.env)")
 
 # =====================================================================
-# 2. LOCAL EMBEDDING ENGINE SETUP (BYPASSES OUTBOUND NETWORK DNS BLOCKS)
+# 2. HIGH-PERFORMANCE API EMBEDDING ROUTE (LOW MEMORY / NO LOCAL TORCH)
 # =====================================================================
 client = MongoClient(MONGO_URI)
 MONGODB_COLLECTION = client["resume_rag"]["embeddings"]
 ATLAS_VECTOR_INDEX_NAME = "vector_index"
 
-# Runs token processing locally inside container memory to secure uptime stability
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
+# Routes embedding execution through Groq's API pipeline to keep memory under 512MB
+embeddings = OpenAIEmbeddings(
+    model="nomic-embed-text-v1.5",
+    openai_api_key=GROQ_API_KEY,
+    openai_api_base="https://api.groq.com/openai/v1"
 )
 
 # Active MongoDB vector store bridge
